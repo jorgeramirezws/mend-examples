@@ -1,0 +1,142 @@
+# ******** Mend Unified CLI Template for Azure DevOps ********
+#
+# You may wish to alter this file to override the build tool and Mend scanning technologies.
+#
+# For more configuration options, please check the technical documentation portal:
+# 📚 https://docs.mend.io/bundle/integrations/page/scan_with_the_mend_cli.html
+#
+# ******** Description ********
+# mend dep will automatically use package managers and file system scanning to detect open source components.
+# mend code will automatically detect languages and frameworks used in your projects to scan for code weaknesses.
+# mend image will automatically scan an image for vulnerabilities with Operating System packages, Open Source vulnerabilities, and for secrets.
+
+# Environment variables from Azure Key Vault must use letters, numbers, and hyphens only. Please reference this link for more information:
+# https://learn.microsoft.com/en-us/azure/key-vault/general/about-keys-secrets-certificates
+# If you are NOT using a service user, and have multiple organizations, don't forget to set the organization in the scope parameter
+# The following values should be added as environment variables with email and userKey being secrets
+# MEND_URL: the mend url that you login to - (https://saas.mend.io) for example
+# MENDEMAIL: the user email for the mend platform account that you wish to scan with. This should be stored as a secret and then translated to MEND_EMAIL at runtime.
+# MENDUSERKEY: the user key found under my profile for the user you wish to scan with. This should be stored as a secret and then translated to MEND_USER_KEY at runtime.
+
+name: 'mend-cli-scan'
+
+# Define your own pipeline trigger here:
+# Below is defined a trigger for scanning on a push to the main branch and scanning on a push to release branches.  This is considered an ideal time to scan so that an SBOM can be created for software releases and inventory is managed for released software.
+trigger:
+- main
+- v*
+
+# Define templates location
+resources:
+  repositories:
+    - repository: templates
+      type: git
+      name: mend-resources/mend-pipeline-templates
+
+pool:
+  vmImage: ubuntu-latest
+  
+variables:
+- name: MEND_URL
+  value: https://app.mend.io 
+# value: https://saas-eu.mend.io
+
+jobs:
+- job: BuildOnMain
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  steps:
+    ### Build the application with your required package manager.  The below example is for dotnet: ###
+    - script: |
+        SLN=$(find ./ -type f -wholename "*.sln" | head -n 1)
+        echo "${SLN} is the solution that will be built"
+        dotnet restore ${SLN} --force
+      displayName: 'dotnet build'
+    ### The mend dep scan should be called AFTER a package manager build step such as "mvn clean install -DskipTests=true" or "npm install --only=prod"
+
+    ### Run a Mend Scan. scanTypeList: Comma-separated list containing any of: SCA,SAST,IMAGE,ALL
+    - template: mend-scan.yml@templates
+      parameters:
+        appName: $(System.TeamProject)
+        projectName: $(Build.Repository.Name)_$(Build.SourceBranchName)
+        scanTypeList: "SCA,SAST"
+
+    ### Generate Mend reports. reportTypeList: Comma-separated list containing any of: SBOM,RISK,INVENTORY,DUE_DILIGENCE,ALL
+    - template: mend-reports.yml@templates
+      parameters:
+        reportTypeList: "ALL"
+
+    ### Publish logs and sarif results ###
+    - publish: $(System.DefaultWorkingDirectory)/logs
+      artifact: mend-logs-reports
+      condition: succeededOrFailed()
+    - publish: $(System.DefaultWorkingDirectory)/logs/code-results.sarif
+      artifact: CodeAnalysisLogs
+      condition: succeededOrFailed()
+
+- job: BuildOnRelease
+  condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/heads/v'))
+  steps:
+    ### Build the application with your required package manager.  The below example is for dotnet: ###
+    - script: |
+        SLN=$(find ./ -type f -wholename "*.sln" | head -n 1)
+        echo "${SLN} is the solution that will be built"
+        dotnet restore ${SLN} --force
+      displayName: 'dotnet build'
+    ### Build the image ###
+    - script: |
+        docker compose version
+        docker compose build
+        docker compose config --images > imagestoscan.txt
+      env:
+        TAG: $(Build.SourceBranchName)
+      displayName: 'Docker Compose Build'
+    ### The mend dep scan should be called AFTER a package manager build step such as "mvn clean install -DskipTests=true" or "npm install --only=prod"
+    - script: |
+
+    ### Run a Mend Scan. scanTypeList: Comma-separated list containing any of: SCA,SAST,IMAGE,ALL
+    - template: mend-scan.yml@templates
+      parameters:
+        appName: $(System.TeamProject)
+        projectName: $(Build.Repository.Name)_$(Build.SourceBranchName)
+        scanTypeList: "SCA,SAST,IMAGE"
+        imagesToScan: imagestoscan.txt
+
+    ### Generate Mend reports. reportTypeList: Comma-separated list containing any of: SBOM,RISK,INVENTORY,DUE_DILIGENCE,ALL
+    - template: mend-reports.yml@templates
+      parameters:
+        reportTypeList: "ALL"
+
+    ### Publish logs and sarif results ###
+    - publish: $(System.DefaultWorkingDirectory)/logs
+      artifact: mend-logs-reports
+      condition: succeededOrFailed()
+    - publish: $(System.DefaultWorkingDirectory)/logs/code-results.sarif
+      artifact: CodeAnalysisLogs
+      condition: succeededOrFailed()
+
+- job: BuildOnPullRequest
+  condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'))
+  steps:
+    ### Build the application with your required package manager.  The below example is for dotnet: ###
+    - script: |
+        SLN=$(find ./ -type f -wholename "*.sln" | head -n 1)
+        echo "${SLN} is the solution that will be built"
+        dotnet restore ${SLN} --force
+      displayName: 'dotnet build'
+    ### The mend dep scan should be called AFTER a package manager build step such as "mvn clean install -DskipTests=true" or "npm install --only=prod"
+    - script: |
+
+    ### Run a Mend Scan. scanTypeList: Comma-separated list containing any of: SCA,SAST,IMAGE,ALL
+    - template: mend-scan.yml@templates
+      parameters:
+        appName: $(System.TeamProject)
+        projectName: $(Build.Repository.Name)_$(Build.SourceBranchName)
+        scanTypeList: "SCA,SAST"
+
+    ### Publish logs and sarif results ###
+    - publish: $(System.DefaultWorkingDirectory)/logs
+      artifact: mend-logs
+      condition: succeededOrFailed()
+    - publish: $(System.DefaultWorkingDirectory)/logs/code-results.sarif
+      artifact: CodeAnalysisLogs
+      condition: succeededOrFailed()
